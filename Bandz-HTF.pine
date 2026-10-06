@@ -1,0 +1,1712 @@
+//@version=6
+// © 2026 Bandz
+// Bandz HTF Context organizes higher-timeframe candle structure, range location,
+// intermarket confirmation, liquidity reactions, and rejection zones in one workflow.
+
+indicator(
+     "Bandz HTF",
+     shorttitle = "Bandz HTF",
+     overlay = true,
+     max_bars_back = 5000,
+     max_boxes_count = 500,
+     max_lines_count = 500,
+     max_labels_count = 500,
+     dynamic_requests = true)
+
+// Object limits are shared by every enabled module. These internal budgets keep
+// the worst-case configuration below TradingView's 500-object limits.
+const int SMT_LINE_BUDGET = 120
+const int TEMPLATE_LINE_BUDGET = 70
+const int TEMPLATE_BOX_BUDGET = 120
+const int REJECTION_ZONE_BOX_BUDGET = 30
+const int RANGE_FUTURE_RESERVE = 34
+const int RANGE_STANDALONE_WIDTH = 9
+const int RANGE_STANDALONE_GAP = 4
+
+const string GROUP_AUTO = "Auto Mode"
+const string GROUP_RANGE = "Auto Range Levels"
+const string GROUP_HTF = "HTF Candle Sets"
+const string GROUP_STYLE = "HTF Candle Style"
+const string GROUP_COMPARE = "Comparison Symbols"
+const string GROUP_PSP = "HTF Direction Confirmation"
+const string GROUP_SMT = "SMT"
+const string GROUP_REJECTION_ZONE = "Bandz Rejection Zone"
+const string GROUP_TEMPLATE = "HTF Structure Tools"
+const string GROUP_DASHBOARD = "HOD / MID / LOD Dashboard"
+
+// Auto mode only assigns lane timeframes. Lane candle counts remain custom.
+bool autoMode = input.bool(true, "Auto HTF mode", group = GROUP_AUTO)
+bool showAutoRanges = input.bool(true, "Show primary + macro ranges", group = GROUP_AUTO)
+
+// Auto range styling and extension behavior.
+bool extendPrimaryRangeTowardPrice = input.bool(false, "Extend primary range left toward live price", group = GROUP_RANGE)
+bool extendMacroRangeTowardPrice = input.bool(false, "Extend macro range left toward live price", group = GROUP_RANGE)
+color rangeHighLowColor = input.color(color.rgb(54, 58, 69), "High / low color", group = GROUP_RANGE)
+color rangeMidpointColor = input.color(color.rgb(242, 54, 69), "50% color", group = GROUP_RANGE)
+color rangeQuarterColor = input.color(color.rgb(41, 98, 255), "25% / 75% color", group = GROUP_RANGE)
+int rangeLevelOpacity = input.int(70, "25% / 50% / 75% opacity", minval = 0, maxval = 100, group = GROUP_RANGE)
+string rangeLabelSize = input.string("Tiny", "Range label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = GROUP_RANGE)
+
+// HTF candle lanes.
+bool lane1Enabled = input.bool(true, "Show", inline = "lane1", group = GROUP_HTF)
+string lane1Tf = input.timeframe("15", "HTF 1", inline = "lane1", group = GROUP_HTF)
+int lane1Count = input.int(4, "Candles", minval = 1, maxval = 20, inline = "lane1", group = GROUP_HTF)
+
+bool lane2Enabled = input.bool(true, "Show", inline = "lane2", group = GROUP_HTF)
+string lane2Tf = input.timeframe("60", "HTF 2", inline = "lane2", group = GROUP_HTF)
+int lane2Count = input.int(4, "Candles", minval = 1, maxval = 20, inline = "lane2", group = GROUP_HTF)
+
+bool lane3Enabled = input.bool(true, "Show", inline = "lane3", group = GROUP_HTF)
+string lane3Tf = input.timeframe("240", "HTF 3", inline = "lane3", group = GROUP_HTF)
+int lane3Count = input.int(4, "Candles", minval = 1, maxval = 20, inline = "lane3", group = GROUP_HTF)
+
+bool lane4Enabled = input.bool(true, "Show", inline = "lane4", group = GROUP_HTF)
+string lane4Tf = input.timeframe("1D", "HTF 4", inline = "lane4", group = GROUP_HTF)
+int lane4Count = input.int(3, "Candles", minval = 1, maxval = 20, inline = "lane4", group = GROUP_HTF)
+
+bool lane5Enabled = input.bool(true, "Show", inline = "lane5", group = GROUP_HTF)
+string lane5Tf = input.timeframe("1W", "HTF 5", inline = "lane5", group = GROUP_HTF)
+int lane5Count = input.int(2, "Candles", minval = 1, maxval = 20, inline = "lane5", group = GROUP_HTF)
+
+// Layout and candle appearance.
+int requestedBaseOffset = input.int(33, "Padding from current price", minval = 1, maxval = 300, group = GROUP_STYLE)
+int requestedSetGap = input.int(5, "Space between HTF sets", minval = 1, maxval = 50, group = GROUP_STYLE)
+int requestedCandleGap = input.int(1, "Space between candles", minval = 0, maxval = 6, group = GROUP_STYLE)
+int requestedBodyWidth = input.int(1, "Candle width", minval = 1, maxval = 5, group = GROUP_STYLE) * 2
+int futureDrawingLimit = input.int(490, "Future drawing safety limit", minval = 120, maxval = 490, group = GROUP_STYLE)
+
+color bullBodyColor = input.color(color.rgb(219, 219, 219), "Bull body", group = GROUP_STYLE)
+color bearBodyColor = input.color(color.rgb(74, 74, 74), "Bear body", group = GROUP_STYLE)
+color dojiBodyColor = color.gray
+color bullBorderColor = input.color(color.black, "Bull border", group = GROUP_STYLE)
+color bearBorderColor = input.color(color.black, "Bear border", group = GROUP_STYLE)
+color dojiBorderColor = color.gray
+color bullWickColor = input.color(color.black, "Bull wick", group = GROUP_STYLE)
+color bearWickColor = input.color(color.black, "Bear wick", group = GROUP_STYLE)
+color dojiWickColor = color.gray
+
+bool showLaneLabels = input.bool(true, "Show HTF labels", group = GROUP_STYLE)
+bool showLaneCountdown = input.bool(true, "Show time until next HTF candle", group = GROUP_STYLE)
+color laneLabelColor = input.color(color.black, "HTF label color", group = GROUP_STYLE)
+string laneLabelSize = input.string("Tiny", "HTF label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = GROUP_STYLE)
+
+// HOD / MID / LOD dashboard.
+bool showDayRangeDashboard = input.bool(false, "Show HOD / MID / LOD dashboard", group = GROUP_DASHBOARD)
+string dayRangeDashboardPositionInput = input.string("Top Right", "Position", options = ["Top Left", "Top Right", "Bottom Left", "Bottom Right"], inline = "dayRangeDash", group = GROUP_DASHBOARD)
+string dayRangeDashboardSizeInput = input.string("Small", "Size", options = ["Small", "Medium"], inline = "dayRangeDash", group = GROUP_DASHBOARD)
+
+// Comparison feeds.
+bool useComparisonA = input.bool(true, "Use Symbol A", inline = "compA1", group = GROUP_COMPARE)
+string comparisonA = input.symbol("CME_MINI:MES1!", "", inline = "compA1", group = GROUP_COMPARE)
+string comparisonALabel = input.string("", "Label", inline = "compA2", group = GROUP_COMPARE)
+bool invertComparisonA = input.bool(false, "Invert relationship", inline = "compA2", group = GROUP_COMPARE)
+
+bool useComparisonB = input.bool(false, "Use Symbol B", inline = "compB1", group = GROUP_COMPARE)
+string comparisonB = input.symbol("CBOT_MINI:YM1!", "", inline = "compB1", group = GROUP_COMPARE)
+string comparisonBLabel = input.string("YM", "Label", inline = "compB2", group = GROUP_COMPARE)
+bool invertComparisonB = input.bool(false, "Invert relationship", inline = "compB2", group = GROUP_COMPARE)
+
+// HTF directional confirmation.
+bool showPsp = input.bool(true, "Highlight directional mismatch", group = GROUP_PSP)
+bool pspRequireEveryComparison = input.bool(false, "Require all enabled comparisons", group = GROUP_PSP)
+bool pspRequireTurtleSoup = input.bool(true, "Require prior HTF high/low raid", group = GROUP_PSP)
+color pspBullColor = input.color(color.rgb(91, 156, 246), "Bullish highlight", group = GROUP_PSP)
+color pspBearColor = input.color(color.rgb(242, 54, 69), "Bearish highlight", group = GROUP_PSP)
+color pspDojiColor = input.color(color.rgb(253, 216, 53), "Neutral highlight", group = GROUP_PSP)
+int pspOpacity = input.int(80, "Highlight opacity", minval = 0, maxval = 100, group = GROUP_PSP)
+
+// SMT.
+bool showSmt = input.bool(true, "Show SMT", group = GROUP_SMT)
+bool showBearishSmt = input.bool(true, "Bearish SMT: chart sweeps high", group = GROUP_SMT)
+bool showBullishSmt = input.bool(true, "Bullish SMT: chart sweeps low", group = GROUP_SMT)
+bool smtRequireEveryComparison = input.bool(false, "Require every enabled symbol to diverge", group = GROUP_SMT)
+bool smtRequireCloseBack = input.bool(false, "Require chart close back inside swept level", group = GROUP_SMT)
+int smtLookback = input.int(12, "SMT lookback per HTF set", minval = 1, maxval = 20, group = GROUP_SMT)
+int smtMaxPerDirection = input.int(3, "Max active SMTs per direction per HTF", minval = 1, maxval = 10, group = GROUP_SMT)
+int requestedSmtStoredPerLane = input.int(50, "Max stored SMTs per HTF set", minval = 5, maxval = 100, group = GROUP_SMT)
+int smtMinimumSweepTicks = input.int(0, "Minimum sweep distance in chart ticks", minval = 0, maxval = 500, group = GROUP_SMT)
+int smtDedupeTicks = input.int(2, "Deduplicate reference levels within chart ticks", minval = 0, maxval = 100, group = GROUP_SMT)
+color smtBearColor = input.color(color.black, "Bearish SMT line color", group = GROUP_SMT)
+color smtBullColor = input.color(color.black, "Bullish SMT line color", group = GROUP_SMT)
+int smtOpacity = input.int(0, "SMT line opacity", minval = 0, maxval = 100, group = GROUP_SMT)
+color smtTextColor = input.color(color.new(color.black, 100), "SMT label color", group = GROUP_SMT)
+string smtTextSize = input.string("Tiny", "SMT label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = GROUP_SMT)
+
+// Bandz Rejection Zone.
+bool showRejectionZone = input.bool(false, "Show automated Rejection Zones", group = GROUP_REJECTION_ZONE)
+string rejectionZoneTf = input.timeframe("60", "Rejection Zone timeframe", group = GROUP_REJECTION_ZONE)
+string rejectionZoneBias = input.string("Both", "Rejection Zone bias", options = ["Both", "Bullish only", "Bearish only"], group = GROUP_REJECTION_ZONE)
+bool rejectionZoneRequireMidpoint = input.bool(false, "Require close through sweep candle midpoint", group = GROUP_REJECTION_ZONE)
+bool detectExpansiveRejectionZone = input.bool(false, "Detect expansive Rejection Zones", group = GROUP_REJECTION_ZONE)
+bool extendLatestRejectionZone = input.bool(false, "Extend latest Rejection Zone", group = GROUP_REJECTION_ZONE)
+bool showLatestRejectionZoneOnly = input.bool(false, "Show only latest Rejection Zone", group = GROUP_REJECTION_ZONE)
+int requestedRejectionZoneBoxes = input.int(5, "Max Rejection Zone boxes", minval = 1, maxval = 50, group = GROUP_REJECTION_ZONE)
+color rejectionZoneBullColor = input.color(color.new(#8ABF91, 88), "Bullish Rejection Zone color", group = GROUP_REJECTION_ZONE)
+color rejectionZoneBearColor = input.color(color.new(#E08C89, 88), "Bearish Rejection Zone color", group = GROUP_REJECTION_ZONE)
+
+// Template drawings.
+bool showAdaptiveMidpoints = input.bool(true, "Show HTF candle midpoints", group = GROUP_TEMPLATE)
+bool showCloseBackSweeps = input.bool(true, "Show template sweep lines", group = GROUP_TEMPLATE)
+bool showTemplateFvg = input.bool(false, "Show HTF FVG", group = GROUP_TEMPLATE)
+color templateFvgColor = input.color(color.new(color.rgb(120, 123, 134), 80), "FVG color", group = GROUP_TEMPLATE)
+bool showTemplateVi = input.bool(false, "Show HTF volume imbalance", group = GROUP_TEMPLATE)
+color templateViColor = input.color(color.new(color.rgb(255, 152, 0), 55), "VI color", group = GROUP_TEMPLATE)
+color templateGuideColor = input.color(color.black, "Midpoint / sweep line color", group = GROUP_TEMPLATE)
+
+type ComparisonSample
+    int aTimestamp
+    int aCloseTimestamp
+    float aOpen
+    float aHigh
+    float aLow
+    float aClose
+    int bTimestamp
+    int bCloseTimestamp
+    float bOpen
+    float bHigh
+    float bLow
+    float bClose
+    bool aReady
+    bool bReady
+
+type HtfBar
+    float openPrice
+    float highPrice
+    float lowPrice
+    float closePrice
+    int identity
+    float aOpen
+    float aHigh
+    float aLow
+    float aClose
+    int aLastTimestamp
+    bool aComplete
+    float bOpen
+    float bHigh
+    float bLow
+    float bClose
+    int bLastTimestamp
+    bool bComplete
+    box bodyBox
+    line upperWick
+    line lowerWick
+
+type SmtCandidate
+    int referenceId
+    int anchorId
+    bool bearish
+    float referenceLevel
+    float sweepLevel
+    string comparisonText
+
+type SmtMark
+    int referenceId
+    int anchorId
+    bool bearish
+    float referenceLevel
+    float sweepLevel
+    float invalidationLevel
+    int detectedOnBar
+    string comparisonText
+    line connector
+    label caption
+
+type HtfLane
+    array<HtfBar> bars
+    array<SmtMark> smtMarks
+    array<line> templateLines
+    array<box> templateBoxes
+    label timeframeLabel
+
+newLane() =>
+    HtfLane.new(
+         array.new<HtfBar>(0),
+         array.new<SmtMark>(0),
+         array.new_line(0),
+         array.new_box(0),
+         na)
+
+var HtfLane lane1 = newLane()
+var HtfLane lane2 = newLane()
+var HtfLane lane3 = newLane()
+var HtfLane lane4 = newLane()
+var HtfLane lane5 = newLane()
+
+var array<box> rejectionZoneBoxes = array.new_box(0)
+var array<line> primaryRangeLines = array.new_line(0)
+var array<label> primaryRangeLabels = array.new_label(0)
+var array<line> macroRangeLines = array.new_line(0)
+var array<label> macroRangeLabels = array.new_label(0)
+
+// Current trading-day HOD / LOD state. The daily boundary follows the symbol's
+// exchange/session calendar, which is appropriate for overnight futures sessions.
+var float dayRangeHigh = na
+var float dayRangeLow = na
+var int dayRangeHighTime = na
+var int dayRangeLowTime = na
+
+string dayRangeTablePosition = switch dayRangeDashboardPositionInput
+    "Top Right" => position.top_right
+    "Bottom Left" => position.bottom_left
+    "Bottom Right" => position.bottom_right
+    => position.top_left
+
+color dayRangeNeutralBg = color.rgb(232, 232, 232)
+color dayRangeHodBg = color.rgb(244, 162, 160)
+color dayRangeMidBg = color.rgb(247, 209, 116)
+color dayRangeLodBg = color.rgb(177, 216, 170)
+color dayRangeBorderColor = color.black
+color dayRangeTextColor = color.black
+
+var table dayRangeTable = table.new(
+     dayRangeTablePosition,
+     3,
+     3,
+     bgcolor = dayRangeNeutralBg,
+     frame_color = dayRangeBorderColor,
+     frame_width = 1,
+     border_color = dayRangeBorderColor,
+     border_width = 1)
+
+transparentColor() =>
+    color.new(color.white, 100)
+
+textSize(string choice) =>
+    string result = size.normal
+    if choice == "Tiny"
+        result := size.tiny
+    else if choice == "Small"
+        result := size.small
+    else if choice == "Large"
+        result := size.large
+    else if choice == "Huge"
+        result := size.huge
+    result
+
+candleDirection(float openValue, float closeValue) =>
+    int result = 0
+    if closeValue > openValue
+        result := 1
+    else if closeValue < openValue
+        result := -1
+    result
+
+relationshipDirection(float openValue, float closeValue, bool inverted) =>
+    int result = candleDirection(openValue, closeValue)
+    inverted ? -result : result
+
+displayName(string preferred, string symbolName) =>
+    string trimmed = str.trim(preferred)
+    str.length(trimmed) > 0 ? trimmed : symbolName
+
+isWholeMultiple(float largerSeconds, float smallerSeconds) =>
+    bool result = false
+    if not na(largerSeconds) and not na(smallerSeconds) and largerSeconds > 0 and smallerSeconds > 0
+        float ratio = largerSeconds / smallerSeconds
+        result := math.abs(ratio - math.round(ratio)) < 0.000001
+    result
+
+// Candle lanes allow any genuinely higher timeframe so calendar mappings such
+// as 1W -> 1M / 3M are available in Auto Mode.
+validCandleTimeframe(string selectedTf) =>
+    float chartSeconds = timeframe.in_seconds()
+    float selectedSeconds = timeframe.in_seconds(selectedTf)
+    not na(chartSeconds) and not na(selectedSeconds) and selectedSeconds > chartSeconds
+
+validAnalysisTimeframe(string selectedTf) =>
+    float chartSeconds = timeframe.in_seconds()
+    float selectedSeconds = timeframe.in_seconds(selectedTf)
+    not na(chartSeconds) and not na(selectedSeconds) and selectedSeconds >= chartSeconds and isWholeMultiple(selectedSeconds, chartSeconds)
+
+formattedTimeframe(string selectedTf) =>
+    float seconds = timeframe.in_seconds(selectedTf)
+    string result = selectedTf
+    if not na(seconds)
+        if seconds < 60
+            result := str.tostring(int(seconds)) + "S"
+        else if seconds < 3600
+            result := str.tostring(int(seconds / 60)) + "M"
+        else if seconds < 86400
+            result := str.tostring(int(seconds / 3600)) + "H"
+        else if seconds < 604800
+            result := str.tostring(int(seconds / 86400)) + "D"
+    result
+
+twoDigitTimePart(int value) =>
+    value < 10 ? "0" + str.tostring(value) : str.tostring(value)
+
+dayRangeTimeText(int timestampValue) =>
+    na(timestampValue) ? "--:--" : twoDigitTimePart(hour(timestampValue, "America/New_York")) + ":" + twoDigitTimePart(minute(timestampValue, "America/New_York"))
+
+dayRangePercentText(float value) =>
+    na(value) ? "--" : (value >= 0 ? "+" : "") + str.tostring(int(math.round(value))) + "%"
+
+remainingTimeText(string selectedTf) =>
+    int selectedClose = time_close(selectedTf)
+    string result = ""
+    if not na(selectedClose)
+        int remainingMs = math.max(selectedClose - timenow, 0)
+        int totalSeconds = int(math.floor(remainingMs / 1000.0))
+        int totalHours = int(math.floor(totalSeconds / 3600.0))
+        int minutes = int(math.floor((totalSeconds % 3600) / 60.0))
+        int seconds = totalSeconds % 60
+        string minuteText = twoDigitTimePart(minutes)
+        string secondText = twoDigitTimePart(seconds)
+        result := totalHours > 0 ? str.tostring(totalHours) + ":" + minuteText + ":" + secondText : minuteText + ":" + secondText
+    result
+
+autoLaneTimeframe(int laneNumber) =>
+    float chartSeconds = timeframe.in_seconds()
+    string result = ""
+
+    if timeframe.isintraday
+        // Keep the macro range timeframe represented by an actual candle lane.
+        if chartSeconds <= 5.0 * 60.0
+            result := laneNumber == 1 ? "30" : laneNumber == 2 ? "60" : laneNumber == 3 ? "240" : laneNumber == 4 ? "1D" : ""
+        else if chartSeconds <= 15.0 * 60.0
+            result := laneNumber == 1 ? "30" : laneNumber == 2 ? "60" : laneNumber == 3 ? "240" : laneNumber == 4 ? "1D" : laneNumber == 5 ? "1W" : ""
+        else if chartSeconds < 60.0 * 60.0
+            result := laneNumber == 1 ? "60" : laneNumber == 2 ? "240" : laneNumber == 3 ? "1D" : laneNumber == 4 ? "1W" : ""
+        else if chartSeconds <= 60.0 * 60.0
+            result := laneNumber == 1 ? "240" : laneNumber == 2 ? "1D" : laneNumber == 3 ? "1W" : ""
+        else if chartSeconds < 4.0 * 60.0 * 60.0
+            result := laneNumber == 1 ? "240" : laneNumber == 2 ? "1D" : laneNumber == 3 ? "1W" : laneNumber == 4 ? "1M" : ""
+        else
+            result := laneNumber == 1 ? "1D" : laneNumber == 2 ? "1W" : laneNumber == 3 ? "1M" : ""
+    else if timeframe.isdaily
+        result := laneNumber == 1 ? "1W" : laneNumber == 2 ? "1M" : laneNumber == 3 ? "3M" : ""
+    else if timeframe.isweekly
+        result := laneNumber == 1 ? "1M" : laneNumber == 2 ? "3M" : laneNumber == 3 ? "12M" : ""
+    else if timeframe.ismonthly
+        // Never assign a same-or-lower monthly candle lane.
+        result := timeframe.multiplier < 3 ? (laneNumber == 1 ? "3M" : laneNumber == 2 ? "12M" : "") : timeframe.multiplier < 12 ? (laneNumber == 1 ? "12M" : "") : ""
+
+    result
+
+autoPrimaryRangeTimeframe() =>
+    float chartSeconds = timeframe.in_seconds()
+    string result = "3M"
+    if timeframe.isintraday
+        result := chartSeconds <= 5.0 * 60.0 ? "240" : chartSeconds <= 60.0 * 60.0 ? "1D" : "1W"
+    else if timeframe.isdaily
+        result := "1M"
+    else if timeframe.isweekly
+        result := "3M"
+    else if timeframe.ismonthly
+        result := "3M"
+    result
+
+autoMacroRangeTimeframe() =>
+    float chartSeconds = timeframe.in_seconds()
+    string result = "12M"
+    if timeframe.isintraday
+        result := chartSeconds <= 5.0 * 60.0 ? "1D" : chartSeconds <= 60.0 * 60.0 ? "1W" : "1M"
+    else if timeframe.isdaily
+        result := "3M"
+    else if timeframe.isweekly
+        result := "12M"
+    else if timeframe.ismonthly
+        result := "12M"
+    result
+
+rangeHighText(string selectedTf) =>
+    selectedTf == "240" ? "P4HH" : selectedTf == "1D" ? "PDH" : selectedTf == "1W" ? "PWH" : selectedTf == "1M" ? "PMH" : selectedTf == "3M" ? "PQH" : selectedTf == "12M" ? "12M H" : "PH"
+
+rangeLowText(string selectedTf) =>
+    selectedTf == "240" ? "P4HL" : selectedTf == "1D" ? "PDL" : selectedTf == "1W" ? "PWL" : selectedTf == "1M" ? "PML" : selectedTf == "3M" ? "PQL" : selectedTf == "12M" ? "12M L" : "PL"
+
+rangeLevelPrefix(string selectedTf) =>
+    selectedTf == "240" ? "4H" : selectedTf == "1D" ? "D" : selectedTf == "1W" ? "W" : selectedTf == "1M" ? "M" : selectedTf == "3M" ? "Q" : selectedTf == "12M" ? "12M" : formattedTimeframe(selectedTf)
+
+adaptiveMidpoint(float highValue, float lowValue, float openValue, float closeValue) =>
+    float result = (highValue + lowValue) / 2.0
+    if highValue > 0 and lowValue > 0 and openValue > 0 and closeValue > 0
+        float logHigh = math.log(highValue)
+        float logLow = math.log(lowValue)
+        float logOpen = math.log(openValue)
+        float logClose = math.log(closeValue)
+        float bodyMagnitude = math.abs(logClose - logOpen)
+        float upperMagnitude = logHigh - math.max(logOpen, logClose)
+        float lowerMagnitude = math.min(logOpen, logClose) - logLow
+        float logResult = (logHigh + logLow) / 2.0
+        if math.max(upperMagnitude, lowerMagnitude) > bodyMagnitude
+            logResult := upperMagnitude > lowerMagnitude ? logHigh - upperMagnitude / 2.0 : logLow + lowerMagnitude / 2.0
+        result := math.exp(logResult)
+    result
+
+barCenter(HtfBar candle) =>
+    int((box.get_left(candle.bodyBox) + box.get_right(candle.bodyBox)) / 2.0)
+
+laneLeftEdge(HtfLane lane, int visibleBars) =>
+    int result = na
+    int count = math.min(visibleBars, array.size(lane.bars))
+    if count > 0
+        // Range levels intentionally begin one displayed candle slot to the right
+        // of the lane's oldest candle, removing the extra left-side bar extension.
+        int anchorIndex = count > 1 ? count - 2 : count - 1
+        HtfBar anchorCandle = array.get(lane.bars, anchorIndex)
+        result := box.get_left(anchorCandle.bodyBox)
+    result
+
+laneRightEdge(HtfLane lane, int visibleBars) =>
+    int result = na
+    int count = math.min(visibleBars, array.size(lane.bars))
+    if count > 0
+        for index = 0 to count - 1
+            HtfBar candle = array.get(lane.bars, index)
+            int candidate = box.get_right(candle.bodyBox)
+            result := na(result) ? candidate : math.max(result, candidate)
+    result
+
+deleteRenderedBar(HtfBar candle) =>
+    if not na(candle.bodyBox)
+        box.delete(candle.bodyBox)
+    if not na(candle.upperWick)
+        line.delete(candle.upperWick)
+    if not na(candle.lowerWick)
+        line.delete(candle.lowerWick)
+
+retireRenderedBar(HtfBar candle) =>
+    deleteRenderedBar(candle)
+    candle.bodyBox := na
+    candle.upperWick := na
+    candle.lowerWick := na
+    candle
+
+method deleteSmtAt(HtfLane lane, int index) =>
+    SmtMark mark = array.get(lane.smtMarks, index)
+    if not na(mark.connector)
+        line.delete(mark.connector)
+    if not na(mark.caption)
+        label.delete(mark.caption)
+    array.remove(lane.smtMarks, index)
+    lane
+
+method clearSmt(HtfLane lane) =>
+    while array.size(lane.smtMarks) > 0
+        lane.deleteSmtAt(array.size(lane.smtMarks) - 1)
+    lane
+
+method deleteSmtUsingId(HtfLane lane, int identity) =>
+    if array.size(lane.smtMarks) > 0
+        for index = array.size(lane.smtMarks) - 1 to 0
+            SmtMark mark = array.get(lane.smtMarks, index)
+            if mark.referenceId == identity or mark.anchorId == identity
+                lane.deleteSmtAt(index)
+    lane
+
+method indexOfBar(HtfLane lane, int identity) =>
+    int result = -1
+    if array.size(lane.bars) > 0
+        for index = 0 to array.size(lane.bars) - 1
+            HtfBar candidate = array.get(lane.bars, index)
+            if candidate.identity == identity
+                result := index
+                break
+    result
+
+baseBodyColor(int direction) =>
+    direction == 1 ? bullBodyColor : direction == -1 ? bearBodyColor : dojiBodyColor
+
+baseBorderColor(int direction) =>
+    direction == 1 ? bullBorderColor : direction == -1 ? bearBorderColor : dojiBorderColor
+
+baseWickColor(int direction) =>
+    direction == 1 ? bullWickColor : direction == -1 ? bearWickColor : dojiWickColor
+
+setCandleVerticalGeometry(HtfBar candle) =>
+    int direction = candleDirection(candle.openPrice, candle.closePrice)
+    float topValue = math.max(candle.openPrice, candle.closePrice)
+    float bottomValue = math.min(candle.openPrice, candle.closePrice)
+    if direction == 0
+        float halfTick = math.max(syminfo.mintick * 0.5, math.abs(candle.closePrice) * 0.00000001)
+        topValue := candle.closePrice + halfTick
+        bottomValue := candle.closePrice - halfTick
+    box.set_top(candle.bodyBox, topValue)
+    box.set_bottom(candle.bodyBox, bottomValue)
+    line.set_y1(candle.upperWick, candle.highPrice)
+    line.set_y2(candle.upperWick, topValue)
+    line.set_y1(candle.lowerWick, bottomValue)
+    line.set_y2(candle.lowerWick, candle.lowPrice)
+
+paintBaseCandle(HtfBar candle) =>
+    int direction = candleDirection(candle.openPrice, candle.closePrice)
+    setCandleVerticalGeometry(candle)
+    box.set_bgcolor(candle.bodyBox, baseBodyColor(direction))
+    box.set_border_color(candle.bodyBox, baseBorderColor(direction))
+    line.set_color(candle.upperWick, baseWickColor(direction))
+    line.set_color(candle.lowerWick, baseWickColor(direction))
+
+comparisonCondition(
+     bool requireAll,
+     bool aEnabled,
+     bool aReady,
+     bool aCondition,
+     bool bEnabled,
+     bool bReady,
+     bool bCondition) =>
+    bool aMatch = aEnabled and aReady and aCondition
+    bool bMatch = bEnabled and bReady and bCondition
+    int readyCount = (aEnabled and aReady ? 1 : 0) + (bEnabled and bReady ? 1 : 0)
+    requireAll and readyCount == 2 ? aMatch and bMatch : aMatch or bMatch
+
+method paintCurrentPsp(HtfLane lane) =>
+    if array.size(lane.bars) > 0
+        HtfBar current = array.get(lane.bars, 0)
+        paintBaseCandle(current)
+
+        if showPsp and (useComparisonA or useComparisonB)
+            int chartDirection = candleDirection(current.openPrice, current.closePrice)
+            bool aReady = useComparisonA and current.aComplete
+            bool bReady = useComparisonB and current.bComplete
+            bool aMismatch = aReady and chartDirection != relationshipDirection(current.aOpen, current.aClose, invertComparisonA)
+            bool bMismatch = bReady and chartDirection != relationshipDirection(current.bOpen, current.bClose, invertComparisonB)
+
+            bool mismatch = comparisonCondition(
+                 pspRequireEveryComparison,
+                 useComparisonA,
+                 aReady,
+                 aMismatch,
+                 useComparisonB,
+                 bReady,
+                 bMismatch)
+
+            bool raidRequirement = true
+            if pspRequireTurtleSoup
+                raidRequirement := false
+                if array.size(lane.bars) > 1
+                    HtfBar previous = array.get(lane.bars, 1)
+                    bool raidedHigh = current.highPrice > previous.highPrice
+                    bool raidedLow = current.lowPrice < previous.lowPrice
+                    raidRequirement := chartDirection == 1 ? raidedLow : chartDirection == -1 ? raidedHigh : (raidedHigh or raidedLow)
+
+            if mismatch and raidRequirement
+                color highlight = chartDirection == 1 ? pspBullColor : chartDirection == -1 ? pspBearColor : pspDojiColor
+                box.set_bgcolor(current.bodyBox, color.new(highlight, pspOpacity))
+    lane
+
+method openLaneBar(HtfLane lane, int maximumBars, ComparisonSample sample) =>
+    HtfBar candle = HtfBar.new()
+    candle.openPrice := open
+    candle.highPrice := high
+    candle.lowPrice := low
+    candle.closePrice := close
+    candle.identity := bar_index
+    candle.aOpen := sample.aOpen
+    candle.aHigh := sample.aHigh
+    candle.aLow := sample.aLow
+    candle.aClose := sample.aClose
+    candle.aLastTimestamp := sample.aTimestamp
+    candle.aComplete := sample.aReady
+    candle.bOpen := sample.bOpen
+    candle.bHigh := sample.bHigh
+    candle.bLow := sample.bLow
+    candle.bClose := sample.bClose
+    candle.bLastTimestamp := sample.bTimestamp
+    candle.bComplete := sample.bReady
+
+    float initialTop = math.max(open, close)
+    float initialBottom = math.min(open, close)
+    if open == close
+        float halfTick = math.max(syminfo.mintick * 0.5, math.abs(close) * 0.00000001)
+        initialTop := close + halfTick
+        initialBottom := close - halfTick
+
+    candle.bodyBox := box.new(
+         left = bar_index,
+         top = initialTop,
+         right = bar_index + 1,
+         bottom = initialBottom,
+         xloc = xloc.bar_index,
+         border_color = baseBorderColor(candleDirection(open, close)),
+         border_width = 1,
+         bgcolor = baseBodyColor(candleDirection(open, close)))
+    candle.upperWick := line.new(
+         x1 = bar_index,
+         y1 = high,
+         x2 = bar_index,
+         y2 = initialTop,
+         xloc = xloc.bar_index,
+         color = baseWickColor(candleDirection(open, close)))
+    candle.lowerWick := line.new(
+         x1 = bar_index,
+         y1 = initialBottom,
+         x2 = bar_index,
+         y2 = low,
+         xloc = xloc.bar_index,
+         color = baseWickColor(candleDirection(open, close)))
+
+    array.unshift(lane.bars, candle)
+
+    while array.size(lane.bars) > maximumBars
+        HtfBar discarded = array.pop(lane.bars)
+        lane.deleteSmtUsingId(discarded.identity)
+        deleteRenderedBar(discarded)
+    lane
+
+method updateLaneBar(HtfLane lane, ComparisonSample sample) =>
+    if array.size(lane.bars) > 0
+        HtfBar candle = array.get(lane.bars, 0)
+        candle.highPrice := math.max(candle.highPrice, high)
+        candle.lowPrice := math.min(candle.lowPrice, low)
+        candle.closePrice := close
+
+        bool aTimestampProgresses = sample.aReady and (na(candle.aLastTimestamp) or sample.aTimestamp >= candle.aLastTimestamp)
+        candle.aComplete := candle.aComplete and aTimestampProgresses
+        if sample.aReady
+            candle.aHigh := na(candle.aHigh) ? sample.aHigh : math.max(candle.aHigh, sample.aHigh)
+            candle.aLow := na(candle.aLow) ? sample.aLow : math.min(candle.aLow, sample.aLow)
+            candle.aClose := sample.aClose
+            candle.aLastTimestamp := sample.aTimestamp
+
+        bool bTimestampProgresses = sample.bReady and (na(candle.bLastTimestamp) or sample.bTimestamp >= candle.bLastTimestamp)
+        candle.bComplete := candle.bComplete and bTimestampProgresses
+        if sample.bReady
+            candle.bHigh := na(candle.bHigh) ? sample.bHigh : math.max(candle.bHigh, sample.bHigh)
+            candle.bLow := na(candle.bLow) ? sample.bLow : math.min(candle.bLow, sample.bLow)
+            candle.bClose := sample.bClose
+            candle.bLastTimestamp := sample.bTimestamp
+
+        array.set(lane.bars, 0, candle)
+        paintBaseCandle(candle)
+    lane
+
+candidateSelected(array<SmtCandidate> selected, bool bearish, int referenceId, int anchorId) =>
+    bool result = false
+    if array.size(selected) > 0
+        for index = 0 to array.size(selected) - 1
+            SmtCandidate candidate = array.get(selected, index)
+            if candidate.bearish == bearish and candidate.referenceId == referenceId and candidate.anchorId == anchorId
+                result := true
+                break
+    result
+
+selectSmtCandidates(array<SmtCandidate> source, bool bearish, int maximumCount, float dedupeDistance) =>
+    array<SmtCandidate> selected = array.new<SmtCandidate>(0)
+    int sourceCount = array.size(source)
+
+    if sourceCount > 0 and maximumCount > 0
+        array<bool> used = array.new_bool(sourceCount, false)
+        for pickNumber = 0 to maximumCount - 1
+            int bestIndex = -1
+            float bestLevel = na
+
+            for candidateIndex = 0 to sourceCount - 1
+                if not array.get(used, candidateIndex)
+                    SmtCandidate candidate = array.get(source, candidateIndex)
+                    bool isBetter = bestIndex == -1 or (bearish ? candidate.referenceLevel > bestLevel : candidate.referenceLevel < bestLevel)
+                    if isBetter
+                        bestIndex := candidateIndex
+                        bestLevel := candidate.referenceLevel
+
+            if bestIndex != -1
+                SmtCandidate best = array.get(source, bestIndex)
+                array.set(used, bestIndex, true)
+                bool duplicatesLevel = false
+                if dedupeDistance > 0 and array.size(selected) > 0
+                    for selectedIndex = 0 to array.size(selected) - 1
+                        SmtCandidate existing = array.get(selected, selectedIndex)
+                        if math.abs(existing.referenceLevel - best.referenceLevel) <= dedupeDistance
+                            duplicatesLevel := true
+                            break
+                if not duplicatesLevel
+                    array.push(selected, best)
+    selected
+
+method smtMarkIndex(HtfLane lane, bool bearish, int referenceId, int anchorId) =>
+    int result = -1
+    if array.size(lane.smtMarks) > 0
+        for index = 0 to array.size(lane.smtMarks) - 1
+            SmtMark mark = array.get(lane.smtMarks, index)
+            if mark.bearish == bearish and mark.referenceId == referenceId and mark.anchorId == anchorId
+                result := index
+                break
+    result
+
+method upsertSmt(HtfLane lane, SmtCandidate candidate, int detectedOnBar) =>
+    int existingIndex = lane.smtMarkIndex(candidate.bearish, candidate.referenceId, candidate.anchorId)
+    if existingIndex >= 0
+        SmtMark existing = array.get(lane.smtMarks, existingIndex)
+        existing.referenceLevel := candidate.referenceLevel
+        existing.sweepLevel := candidate.sweepLevel
+        existing.invalidationLevel := candidate.sweepLevel
+        existing.comparisonText := candidate.comparisonText
+        array.set(lane.smtMarks, existingIndex, existing)
+    else
+        SmtMark created = SmtMark.new()
+        created.referenceId := candidate.referenceId
+        created.anchorId := candidate.anchorId
+        created.bearish := candidate.bearish
+        created.referenceLevel := candidate.referenceLevel
+        created.sweepLevel := candidate.sweepLevel
+        created.invalidationLevel := candidate.sweepLevel
+        created.detectedOnBar := detectedOnBar
+        created.comparisonText := candidate.comparisonText
+        created.connector := na
+        created.caption := na
+        array.unshift(lane.smtMarks, created)
+    lane
+
+method removeUnselectedCurrentSmt(HtfLane lane, array<SmtCandidate> selectedBearish, array<SmtCandidate> selectedBullish) =>
+    if array.size(lane.smtMarks) > 0 and array.size(lane.bars) > 0
+        HtfBar current = array.get(lane.bars, 0)
+        for index = array.size(lane.smtMarks) - 1 to 0
+            SmtMark mark = array.get(lane.smtMarks, index)
+            if mark.anchorId == current.identity
+                bool keep = mark.bearish ?
+                     candidateSelected(selectedBearish, true, mark.referenceId, mark.anchorId) :
+                     candidateSelected(selectedBullish, false, mark.referenceId, mark.anchorId)
+                if not keep
+                    lane.deleteSmtAt(index)
+    lane
+
+method scanCurrentSmt(HtfLane lane, int detectedOnBar, int storageCap) =>
+    if not showSmt
+        lane.clearSmt()
+    else if array.size(lane.bars) > 1 and (useComparisonA or useComparisonB)
+        HtfBar current = array.get(lane.bars, 0)
+        int usableLookback = math.min(smtLookback, array.size(lane.bars) - 1)
+        int selectedLimit = math.min(smtMaxPerDirection, usableLookback)
+        float minimumDistance = smtMinimumSweepTicks * syminfo.mintick
+        float duplicateTolerance = smtDedupeTicks * syminfo.mintick
+        string aName = displayName(comparisonALabel, comparisonA)
+        string bName = displayName(comparisonBLabel, comparisonB)
+
+        array<SmtCandidate> bearishCandidates = array.new<SmtCandidate>(0)
+        array<SmtCandidate> bullishCandidates = array.new<SmtCandidate>(0)
+
+        for referenceIndex = 1 to usableLookback
+            HtfBar reference = array.get(lane.bars, referenceIndex)
+
+            bool runningHigh = true
+            bool runningLow = true
+            if referenceIndex > 1
+                for nearerIndex = 1 to referenceIndex - 1
+                    HtfBar nearer = array.get(lane.bars, nearerIndex)
+                    if nearer.highPrice >= reference.highPrice
+                        runningHigh := false
+                    if nearer.lowPrice <= reference.lowPrice
+                        runningLow := false
+
+            if showBearishSmt and runningHigh and current.highPrice > reference.highPrice
+                bool distanceOk = minimumDistance <= 0 or current.highPrice - reference.highPrice >= minimumDistance
+                bool closeBackOk = not smtRequireCloseBack or current.closePrice < reference.highPrice
+                bool aReady = useComparisonA and current.aComplete and reference.aComplete
+                bool bReady = useComparisonB and current.bComplete and reference.bComplete
+                bool aFailed = aReady and (invertComparisonA ? current.aLow >= reference.aLow : current.aHigh <= reference.aHigh)
+                bool bFailed = bReady and (invertComparisonB ? current.bLow >= reference.bLow : current.bHigh <= reference.bHigh)
+                bool diverged = comparisonCondition(
+                     smtRequireEveryComparison,
+                     useComparisonA,
+                     aReady,
+                     aFailed,
+                     useComparisonB,
+                     bReady,
+                     bFailed)
+
+                if distanceOk and closeBackOk and diverged
+                    string comparisonText = aFailed and bFailed ? aName + "/" + bName : aFailed ? aName : bName
+                    SmtCandidate candidate = SmtCandidate.new()
+                    candidate.referenceId := reference.identity
+                    candidate.anchorId := current.identity
+                    candidate.bearish := true
+                    candidate.referenceLevel := reference.highPrice
+                    candidate.sweepLevel := current.highPrice
+                    candidate.comparisonText := comparisonText
+                    array.push(bearishCandidates, candidate)
+
+            if showBullishSmt and runningLow and current.lowPrice < reference.lowPrice
+                bool distanceOk = minimumDistance <= 0 or reference.lowPrice - current.lowPrice >= minimumDistance
+                bool closeBackOk = not smtRequireCloseBack or current.closePrice > reference.lowPrice
+                bool aReady = useComparisonA and current.aComplete and reference.aComplete
+                bool bReady = useComparisonB and current.bComplete and reference.bComplete
+                bool aFailed = aReady and (invertComparisonA ? current.aHigh <= reference.aHigh : current.aLow >= reference.aLow)
+                bool bFailed = bReady and (invertComparisonB ? current.bHigh <= reference.bHigh : current.bLow >= reference.bLow)
+                bool diverged = comparisonCondition(
+                     smtRequireEveryComparison,
+                     useComparisonA,
+                     aReady,
+                     aFailed,
+                     useComparisonB,
+                     bReady,
+                     bFailed)
+
+                if distanceOk and closeBackOk and diverged
+                    string comparisonText = aFailed and bFailed ? aName + "/" + bName : aFailed ? aName : bName
+                    SmtCandidate candidate = SmtCandidate.new()
+                    candidate.referenceId := reference.identity
+                    candidate.anchorId := current.identity
+                    candidate.bearish := false
+                    candidate.referenceLevel := reference.lowPrice
+                    candidate.sweepLevel := current.lowPrice
+                    candidate.comparisonText := comparisonText
+                    array.push(bullishCandidates, candidate)
+
+        array<SmtCandidate> selectedBearish = selectSmtCandidates(bearishCandidates, true, selectedLimit, duplicateTolerance)
+        array<SmtCandidate> selectedBullish = selectSmtCandidates(bullishCandidates, false, selectedLimit, duplicateTolerance)
+
+        lane.removeUnselectedCurrentSmt(selectedBearish, selectedBullish)
+
+        if array.size(selectedBearish) > 0
+            for index = 0 to array.size(selectedBearish) - 1
+                lane.upsertSmt(array.get(selectedBearish, index), detectedOnBar)
+
+        if array.size(selectedBullish) > 0
+            for index = 0 to array.size(selectedBullish) - 1
+                lane.upsertSmt(array.get(selectedBullish, index), detectedOnBar)
+
+        while array.size(lane.smtMarks) > storageCap
+            lane.deleteSmtAt(array.size(lane.smtMarks) - 1)
+    lane
+
+method expireSmt(HtfLane lane, int visibleBars) =>
+    if not showSmt
+        lane.clearSmt()
+    else if array.size(lane.smtMarks) > 0 and array.size(lane.bars) > 0
+        HtfBar newest = array.get(lane.bars, 0)
+        for index = array.size(lane.smtMarks) - 1 to 0
+            SmtMark mark = array.get(lane.smtMarks, index)
+            int referenceIndex = lane.indexOfBar(mark.referenceId)
+            int anchorIndex = lane.indexOfBar(mark.anchorId)
+
+            // Both endpoints must remain among the configured displayed candles.
+            if referenceIndex < 0 or anchorIndex < 0 or referenceIndex >= visibleBars or anchorIndex >= visibleBars
+                lane.deleteSmtAt(index)
+            else
+                HtfBar reference = array.get(lane.bars, referenceIndex)
+                HtfBar anchor = array.get(lane.bars, anchorIndex)
+                if anchor.identity == newest.identity
+                    mark.invalidationLevel := mark.bearish ? anchor.highPrice : anchor.lowPrice
+                else
+                    bool broken = bar_index > mark.detectedOnBar and (mark.bearish ? high > mark.invalidationLevel : low < mark.invalidationLevel)
+                    if broken
+                        lane.deleteSmtAt(index)
+                        continue
+
+                mark.referenceLevel := mark.bearish ? reference.highPrice : reference.lowPrice
+                mark.sweepLevel := mark.bearish ? anchor.highPrice : anchor.lowPrice
+                array.set(lane.smtMarks, index, mark)
+    lane
+
+method ingestLane(
+     HtfLane lane,
+     bool periodChanged,
+     int visibleBars,
+     ComparisonSample sample,
+     int storageCap) =>
+    bool alreadyHasBars = array.size(lane.bars) > 0
+    if periodChanged or not alreadyHasBars
+        lane.openLaneBar(visibleBars, sample)
+    else
+        lane.updateLaneBar(sample)
+
+    lane.paintCurrentPsp()
+    lane.expireSmt(visibleBars)
+
+    if barstate.islast or barstate.isrealtime
+        lane.scanCurrentSmt(bar_index, storageCap)
+    lane
+
+method layoutLane(
+     HtfLane lane,
+     int startOffset,
+     int reservedCount,
+     int slotWidth,
+     int bodyWidth,
+     int gapAfterLane,
+     string selectedTf) =>
+    int availableBars = math.min(reservedCount, array.size(lane.bars))
+    float highestDisplayed = na
+
+    if availableBars > 0
+        for index = 0 to availableBars - 1
+            HtfBar candle = array.get(lane.bars, index)
+            int positionInLane = reservedCount - 1 - index
+            int leftX = bar_index + startOffset + positionInLane * slotWidth
+            int rightX = leftX + bodyWidth
+            int middleX = int((leftX + rightX) / 2.0)
+
+            box.set_left(candle.bodyBox, leftX)
+            box.set_right(candle.bodyBox, rightX)
+            line.set_x1(candle.upperWick, middleX)
+            line.set_x2(candle.upperWick, middleX)
+            line.set_x1(candle.lowerWick, middleX)
+            line.set_x2(candle.lowerWick, middleX)
+            highestDisplayed := na(highestDisplayed) ? candle.highPrice : math.max(highestDisplayed, candle.highPrice)
+
+    if showLaneLabels and availableBars > 0
+        int labelX = bar_index + startOffset + int(((reservedCount - 1) * slotWidth + bodyWidth) / 2.0)
+        string labelText = formattedTimeframe(selectedTf)
+        if showLaneCountdown
+            string countdownText = remainingTimeText(selectedTf)
+            if str.length(countdownText) > 0
+                labelText += " · " + countdownText
+        if na(lane.timeframeLabel)
+            lane.timeframeLabel := label.new(
+                 x = labelX,
+                 y = highestDisplayed,
+                 text = labelText,
+                 xloc = xloc.bar_index,
+                 color = transparentColor(),
+                 textcolor = laneLabelColor,
+                 style = label.style_label_down,
+                 size = textSize(laneLabelSize),
+                 text_font_family = font.family_monospace)
+        else
+            label.set_xy(lane.timeframeLabel, labelX, highestDisplayed)
+            label.set_text(lane.timeframeLabel, labelText)
+            label.set_textcolor(lane.timeframeLabel, laneLabelColor)
+            label.set_size(lane.timeframeLabel, textSize(laneLabelSize))
+    else if not na(lane.timeframeLabel)
+        label.delete(lane.timeframeLabel)
+        lane.timeframeLabel := na
+
+    startOffset + reservedCount * slotWidth + gapAfterLane
+
+method syncSmtDrawings(HtfLane lane, int visibleBars) =>
+    if array.size(lane.smtMarks) > 0
+        int renderedCount = math.min(visibleBars, array.size(lane.bars))
+        for index = array.size(lane.smtMarks) - 1 to 0
+            SmtMark mark = array.get(lane.smtMarks, index)
+            int referenceIndex = lane.indexOfBar(mark.referenceId)
+            int anchorIndex = lane.indexOfBar(mark.anchorId)
+
+            if referenceIndex < 0 or anchorIndex < 0 or referenceIndex >= renderedCount or anchorIndex >= renderedCount or renderedCount == 0
+                lane.deleteSmtAt(index)
+            else
+                HtfBar reference = array.get(lane.bars, referenceIndex)
+                HtfBar anchor = array.get(lane.bars, anchorIndex)
+                int x1 = barCenter(reference)
+                int x2 = barCenter(anchor)
+                color markColor = mark.bearish ? color.new(smtBearColor, smtOpacity) : color.new(smtBullColor, smtOpacity)
+
+                if na(mark.connector)
+                    mark.connector := line.new(
+                         x1 = x1,
+                         y1 = mark.referenceLevel,
+                         x2 = x2,
+                         y2 = mark.sweepLevel,
+                         xloc = xloc.bar_index,
+                         color = markColor,
+                         width = 1)
+                else
+                    line.set_xy1(mark.connector, x1, mark.referenceLevel)
+                    line.set_xy2(mark.connector, x2, mark.sweepLevel)
+                    line.set_color(mark.connector, markColor)
+
+                int labelX = int((x1 + x2) / 2.0)
+                float centerPrice = (mark.referenceLevel + mark.sweepLevel) / 2.0
+                float verticalOffset = math.max(syminfo.mintick * 10.0, math.abs(mark.sweepLevel - mark.referenceLevel) * 0.75)
+                float labelY = mark.bearish ? centerPrice + verticalOffset : centerPrice - verticalOffset
+
+                if na(mark.caption)
+                    mark.caption := label.new(
+                         x = labelX,
+                         y = labelY,
+                         text = mark.comparisonText,
+                         xloc = xloc.bar_index,
+                         color = transparentColor(),
+                         textcolor = smtTextColor,
+                         style = label.style_label_left,
+                         size = textSize(smtTextSize),
+                         text_font_family = font.family_monospace)
+                else
+                    label.set_xy(mark.caption, labelX, labelY)
+                    label.set_text(mark.caption, mark.comparisonText)
+                    label.set_textcolor(mark.caption, smtTextColor)
+                    label.set_size(mark.caption, textSize(smtTextSize))
+
+                array.set(lane.smtMarks, index, mark)
+    lane
+writeTemplateLine(
+     array<line> pool,
+     int index,
+     int x1,
+     float y1,
+     int x2,
+     float y2,
+     color drawingColor,
+     string drawingStyle) =>
+    if index < array.size(pool)
+        line existing = array.get(pool, index)
+        line.set_xy1(existing, x1, y1)
+        line.set_xy2(existing, x2, y2)
+        line.set_color(existing, drawingColor)
+        line.set_style(existing, drawingStyle)
+    else
+        line created = line.new(
+             x1 = x1,
+             y1 = y1,
+             x2 = x2,
+             y2 = y2,
+             xloc = xloc.bar_index,
+             color = drawingColor,
+             width = 1,
+             style = drawingStyle)
+        array.push(pool, created)
+
+writeTemplateBox(
+     array<box> pool,
+     int index,
+     int leftX,
+     float topValue,
+     int rightX,
+     float bottomValue,
+     color fillColor) =>
+    if index < array.size(pool)
+        box existing = array.get(pool, index)
+        box.set_left(existing, leftX)
+        box.set_right(existing, rightX)
+        box.set_top(existing, topValue)
+        box.set_bottom(existing, bottomValue)
+        box.set_bgcolor(existing, fillColor)
+        box.set_border_color(existing, transparentColor())
+    else
+        box created = box.new(
+             left = leftX,
+             top = topValue,
+             right = rightX,
+             bottom = bottomValue,
+             xloc = xloc.bar_index,
+             bgcolor = fillColor,
+             border_color = transparentColor())
+        array.push(pool, created)
+
+trimLinePool(array<line> pool, int keepCount) =>
+    while array.size(pool) > keepCount
+        line.delete(array.pop(pool))
+
+trimBoxPool(array<box> pool, int keepCount) =>
+    while array.size(pool) > keepCount
+        box.delete(array.pop(pool))
+
+trimLabelPool(array<label> pool, int keepCount) =>
+    while array.size(pool) > keepCount
+        label.delete(array.pop(pool))
+
+clearRangePool(array<line> linePool, array<label> labelPool) =>
+    trimLinePool(linePool, 0)
+    trimLabelPool(labelPool, 0)
+
+writeRangeLine(
+     array<line> pool,
+     int index,
+     int x1,
+     float y1,
+     int x2,
+     float y2,
+     color drawingColor,
+     int drawingWidth) =>
+    if index < array.size(pool)
+        line existing = array.get(pool, index)
+        line.set_xy1(existing, x1, y1)
+        line.set_xy2(existing, x2, y2)
+        line.set_color(existing, drawingColor)
+        line.set_width(existing, drawingWidth)
+        line.set_style(existing, line.style_solid)
+    else
+        line created = line.new(
+             x1 = x1,
+             y1 = y1,
+             x2 = x2,
+             y2 = y2,
+             xloc = xloc.bar_index,
+             color = drawingColor,
+             width = drawingWidth,
+             style = line.style_solid)
+        array.push(pool, created)
+
+writeRangeLabel(
+     array<label> pool,
+     int index,
+     int x,
+     float y,
+     string caption,
+     color textColor) =>
+    if index < array.size(pool)
+        label existing = array.get(pool, index)
+        label.set_xy(existing, x, y)
+        label.set_text(existing, caption)
+        label.set_textcolor(existing, textColor)
+        label.set_size(existing, textSize(rangeLabelSize))
+    else
+        label created = label.new(
+             x = x,
+             y = y,
+             text = caption,
+             xloc = xloc.bar_index,
+             color = transparentColor(),
+             textcolor = textColor,
+             style = label.style_label_left,
+             size = textSize(rangeLabelSize),
+             text_font_family = font.family_monospace)
+        array.push(pool, created)
+
+syncAutoRange(
+     array<line> linePool,
+     array<label> labelPool,
+     string selectedTf,
+     float previousHigh,
+     float previousLow,
+     bool macroRange,
+     bool extendTowardPrice,
+     int compactLeft,
+     int compactRight) =>
+    bool validRange = not na(previousHigh) and not na(previousLow) and previousHigh > previousLow and not na(compactLeft) and not na(compactRight)
+    if not validRange
+        clearRangePool(linePool, labelPool)
+    else
+        float rangeSize = previousHigh - previousLow
+        float level25 = previousHigh - rangeSize * 0.25
+        float level50 = previousHigh - rangeSize * 0.50
+        float level75 = previousHigh - rangeSize * 0.75
+
+        color midpointColor = color.new(rangeMidpointColor, 100 - rangeLevelOpacity)
+        color quarterColor = color.new(rangeQuarterColor, 100 - rangeLevelOpacity)
+
+        int leftX = extendTowardPrice ? bar_index : compactLeft
+        int bracketX = compactRight + 1
+        int labelX = bracketX + 1
+        string prefix = rangeLevelPrefix(selectedTf)
+
+        int usedLines = 0
+        int usedLabels = 0
+
+        writeRangeLine(linePool, usedLines, leftX, previousHigh, bracketX, previousHigh, rangeHighLowColor, 2)
+        usedLines += 1
+        writeRangeLabel(labelPool, usedLabels, labelX, previousHigh, rangeHighText(selectedTf), rangeHighLowColor)
+        usedLabels += 1
+
+        if macroRange
+            writeRangeLine(linePool, usedLines, leftX, level25, bracketX, level25, quarterColor, 1)
+            usedLines += 1
+            writeRangeLabel(labelPool, usedLabels, labelX, level25, prefix + " 25%", quarterColor)
+            usedLabels += 1
+
+        writeRangeLine(linePool, usedLines, leftX, level50, bracketX, level50, midpointColor, 2)
+        usedLines += 1
+        writeRangeLabel(labelPool, usedLabels, labelX, level50, prefix + " 50%", midpointColor)
+        usedLabels += 1
+
+        if macroRange
+            writeRangeLine(linePool, usedLines, leftX, level75, bracketX, level75, quarterColor, 1)
+            usedLines += 1
+            writeRangeLabel(labelPool, usedLabels, labelX, level75, prefix + " 75%", quarterColor)
+            usedLabels += 1
+
+        writeRangeLine(linePool, usedLines, leftX, previousLow, bracketX, previousLow, rangeHighLowColor, 2)
+        usedLines += 1
+        writeRangeLabel(labelPool, usedLabels, labelX, previousLow, rangeLowText(selectedTf), rangeHighLowColor)
+        usedLabels += 1
+
+        // No vertical range bracket; retain only the horizontal range levels.
+
+        trimLinePool(linePool, usedLines)
+        trimLabelPool(labelPool, usedLabels)
+
+method syncTemplateDrawings(HtfLane lane, int visibleBars, int lineCap, int boxCap) =>
+    int usedLines = 0
+    int attemptedLines = 0
+    int usedBoxes = 0
+    int attemptedBoxes = 0
+    int count = math.min(visibleBars, array.size(lane.bars))
+
+    if count > 1 and showAdaptiveMidpoints
+        for index = 1 to count - 1
+            HtfBar older = array.get(lane.bars, index)
+            HtfBar newer = array.get(lane.bars, index - 1)
+            float midpoint = adaptiveMidpoint(older.highPrice, older.lowPrice, older.openPrice, older.closePrice)
+            attemptedLines += 1
+            if usedLines < lineCap
+                writeTemplateLine(
+                     lane.templateLines,
+                     usedLines,
+                     barCenter(older),
+                     midpoint,
+                     barCenter(newer),
+                     midpoint,
+                     templateGuideColor,
+                     line.style_dashed)
+                usedLines += 1
+
+    if count > 1 and showCloseBackSweeps
+        for index = 0 to count - 2
+            HtfBar current = array.get(lane.bars, index)
+            HtfBar prior = array.get(lane.bars, index + 1)
+
+            if current.highPrice > prior.highPrice and current.closePrice < prior.highPrice
+                attemptedLines += 1
+                if usedLines < lineCap
+                    writeTemplateLine(
+                         lane.templateLines,
+                         usedLines,
+                         barCenter(prior),
+                         prior.highPrice,
+                         box.get_right(current.bodyBox),
+                         prior.highPrice,
+                         templateGuideColor,
+                         line.style_solid)
+                    usedLines += 1
+
+            if current.lowPrice < prior.lowPrice and current.closePrice > prior.lowPrice
+                attemptedLines += 1
+                if usedLines < lineCap
+                    writeTemplateLine(
+                         lane.templateLines,
+                         usedLines,
+                         barCenter(prior),
+                         prior.lowPrice,
+                         box.get_right(current.bodyBox),
+                         prior.lowPrice,
+                         templateGuideColor,
+                         line.style_solid)
+                    usedLines += 1
+
+    if count > 2 and showTemplateFvg
+        for index = 0 to count - 3
+            HtfBar current = array.get(lane.bars, index)
+            HtfBar twoBack = array.get(lane.bars, index + 2)
+            bool bullishGap = current.lowPrice > twoBack.highPrice and math.min(current.openPrice, current.closePrice) > math.max(twoBack.openPrice, twoBack.closePrice)
+            bool bearishGap = current.highPrice < twoBack.lowPrice and math.max(current.openPrice, current.closePrice) < math.min(twoBack.openPrice, twoBack.closePrice)
+
+            if bullishGap
+                attemptedBoxes += 1
+                if usedBoxes < boxCap
+                    writeTemplateBox(
+                         lane.templateBoxes,
+                         usedBoxes,
+                         box.get_left(twoBack.bodyBox),
+                         current.lowPrice,
+                         box.get_right(current.bodyBox),
+                         twoBack.highPrice,
+                         templateFvgColor)
+                    usedBoxes += 1
+
+            if bearishGap
+                attemptedBoxes += 1
+                if usedBoxes < boxCap
+                    writeTemplateBox(
+                         lane.templateBoxes,
+                         usedBoxes,
+                         box.get_left(twoBack.bodyBox),
+                         twoBack.lowPrice,
+                         box.get_right(current.bodyBox),
+                         current.highPrice,
+                         templateFvgColor)
+                    usedBoxes += 1
+
+    if count > 1 and showTemplateVi
+        for index = 0 to count - 2
+            HtfBar current = array.get(lane.bars, index)
+            HtfBar prior = array.get(lane.bars, index + 1)
+            bool bullishVi = current.lowPrice < prior.highPrice and math.min(current.openPrice, current.closePrice) > math.max(prior.openPrice, prior.closePrice)
+            bool bearishVi = current.highPrice > prior.lowPrice and math.max(current.openPrice, current.closePrice) < math.min(prior.openPrice, prior.closePrice)
+
+            if bullishVi
+                attemptedBoxes += 1
+                if usedBoxes < boxCap
+                    writeTemplateBox(
+                         lane.templateBoxes,
+                         usedBoxes,
+                         box.get_left(prior.bodyBox),
+                         math.min(current.openPrice, current.closePrice),
+                         box.get_right(current.bodyBox),
+                         math.max(prior.openPrice, prior.closePrice),
+                         templateViColor)
+                    usedBoxes += 1
+
+            if bearishVi
+                attemptedBoxes += 1
+                if usedBoxes < boxCap
+                    writeTemplateBox(
+                         lane.templateBoxes,
+                         usedBoxes,
+                         box.get_left(prior.bodyBox),
+                         math.min(prior.openPrice, prior.closePrice),
+                         box.get_right(current.bodyBox),
+                         math.max(current.openPrice, current.closePrice),
+                         templateViColor)
+                    usedBoxes += 1
+
+    trimLinePool(lane.templateLines, usedLines)
+    trimBoxPool(lane.templateBoxes, usedBoxes)
+    attemptedLines > lineCap or attemptedBoxes > boxCap
+
+clearRejectionZoneBoxes() =>
+    while array.size(rejectionZoneBoxes) > 0
+        box.delete(array.pop(rejectionZoneBoxes))
+
+storeRejectionZone(bool bullish, int leftTime, int rightTime, float edgeA, float edgeB, int boxCap) =>
+    float zoneTop = math.max(edgeA, edgeB)
+    float zoneBottom = math.min(edgeA, edgeB)
+    bool drawable = not na(leftTime) and not na(rightTime) and not na(zoneTop) and not na(zoneBottom) and zoneTop > zoneBottom
+    if drawable
+        int zoneRight = extendLatestRejectionZone ? time : rightTime
+        box zoneBox = box.new(
+             left = leftTime,
+             top = zoneTop,
+             right = zoneRight,
+             bottom = zoneBottom,
+             xloc = xloc.bar_time,
+             bgcolor = bullish ? rejectionZoneBullColor : rejectionZoneBearColor,
+             border_color = transparentColor())
+        array.unshift(rejectionZoneBoxes, zoneBox)
+
+        int keepCount = showLatestRejectionZoneOnly ? 1 : boxCap
+        while array.size(rejectionZoneBoxes) > keepCount
+            box.delete(array.pop(rejectionZoneBoxes))
+
+rejectionZonePacket(bool allowBullish, bool allowBearish, bool requireMidpoint, bool allowExpansion) =>
+    int direction = 0
+    float zoneMid = na
+    float zoneClose = close[1]
+    int zoneStart = time[1]
+    int zoneEnd = time_close[1]
+
+    bool baseReady = not na(open[1]) and not na(high[1]) and not na(low[1]) and not na(close[1]) and
+         not na(open[2]) and not na(high[2]) and not na(low[2]) and not na(close[2])
+
+    if baseReady
+        zoneMid := adaptiveMidpoint(high[1], low[1], open[1], close[1])
+        bool sweptBoth = high[1] > high[2] and low[1] < low[2] and close[1] < high[2] and close[1] > low[2]
+        bool baseBear = allowBearish and high[1] > high[2] and close[1] < high[2] and not sweptBoth
+        bool baseBull = allowBullish and low[1] < low[2] and close[1] > low[2] and not sweptBoth
+        baseBear := baseBear and (not requireMidpoint or close[1] < zoneMid)
+        baseBull := baseBull and (not requireMidpoint or close[1] > zoneMid)
+
+        if baseBear
+            direction := -1
+        else if baseBull
+            direction := 1
+        else if allowExpansion and not na(open[3]) and not na(high[3]) and not na(low[3]) and not na(close[3])
+            float priorMid = adaptiveMidpoint(high[2], low[2], open[2], close[2])
+            bool priorSweptBoth = high[2] > high[3] and low[2] < low[3] and close[2] < high[3] and close[2] > low[3]
+            bool expandedBear = allowBearish and high[2] > high[3] and close[1] < math.max(open[2], close[2]) and not sweptBoth
+            bool expandedBull = allowBullish and low[2] < low[3] and close[1] > math.min(open[2], close[2]) and not sweptBoth
+            expandedBear := expandedBear and (close[2] >= priorMid or close[2] >= high[3] or priorSweptBoth)
+            expandedBull := expandedBull and (close[2] <= priorMid or close[2] <= low[3] or priorSweptBoth)
+            expandedBear := expandedBear and (not requireMidpoint or close[1] < zoneMid)
+            expandedBull := expandedBull and (not requireMidpoint or close[1] > zoneMid)
+
+            if expandedBear
+                direction := -1
+            else if expandedBull
+                direction := 1
+
+    [direction, zoneMid, zoneClose, zoneStart, zoneEnd]
+
+runRejectionZone(int boxCap) =>
+    if not showRejectionZone
+        clearRejectionZoneBoxes()
+    else
+        bool timeframeOk = validAnalysisTimeframe(rejectionZoneTf)
+        bool newAnalysisBar = ta.change(time(rejectionZoneTf)) != 0
+
+        if extendLatestRejectionZone and array.size(rejectionZoneBoxes) > 0
+            box.set_right(array.get(rejectionZoneBoxes, 0), time)
+
+        if timeframeOk and newAnalysisBar
+            bool allowBullish = rejectionZoneBias == "Both" or rejectionZoneBias == "Bullish only"
+            bool allowBearish = rejectionZoneBias == "Both" or rejectionZoneBias == "Bearish only"
+            [zoneDirection, zoneMid, zoneClose, zoneStart, zoneEnd] = request.security(
+                 syminfo.tickerid,
+                 rejectionZoneTf,
+                 rejectionZonePacket(allowBullish, allowBearish, rejectionZoneRequireMidpoint, detectExpansiveRejectionZone),
+                 gaps = barmerge.gaps_off,
+                 lookahead = barmerge.lookahead_off)
+
+            if zoneDirection != 0
+                storeRejectionZone(zoneDirection == 1, zoneStart, zoneEnd, zoneMid, zoneClose, boxCap)
+
+// Track the current trading day's high/low and the chart-bar time at which each
+// extreme was first established. On a 1-minute chart this gives minute precision;
+// on higher chart timeframes the displayed time is that bar's opening time.
+bool newDayRangeSession = ta.change(time("1D")) != 0
+if na(dayRangeHigh) or na(dayRangeLow) or newDayRangeSession
+    dayRangeHigh := high
+    dayRangeLow := low
+    dayRangeHighTime := time
+    dayRangeLowTime := time
+else
+    if high > dayRangeHigh
+        dayRangeHigh := high
+        dayRangeHighTime := time
+    if low < dayRangeLow
+        dayRangeLow := low
+        dayRangeLowTime := time
+
+float dayRangeMid = not na(dayRangeHigh) and not na(dayRangeLow) ? (dayRangeHigh + dayRangeLow) / 2.0 : na
+float dayRangeSpan = not na(dayRangeHigh) and not na(dayRangeLow) ? dayRangeHigh - dayRangeLow : na
+float dayRangePercent = not na(dayRangeSpan) and dayRangeSpan > 0 ? math.max(0.0, math.min(100.0, (close - dayRangeLow) / dayRangeSpan * 100.0)) : na
+
+// Comparison OHLC is requested on the chart timeframe, then aggregated inside
+// each selected HTF lane. Forward-filled chart-timeframe samples preserve the
+// original PSP/SMT behavior when a comparison market has a shorter session.
+[rawATimestamp, rawACloseTimestamp, rawAOpen, rawAHigh, rawALow, rawAClose] = request.security(
+     comparisonA,
+     timeframe.period,
+     [time, time_close, open, high, low, close],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off,
+     ignore_invalid_symbol = true)
+[rawBTimestamp, rawBCloseTimestamp, rawBOpen, rawBHigh, rawBLow, rawBClose] = request.security(
+     comparisonB,
+     timeframe.period,
+     [time, time_close, open, high, low, close],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off,
+     ignore_invalid_symbol = true)
+
+bool rawAReady =
+     not na(rawAOpen) and
+     not na(rawAHigh) and
+     not na(rawALow) and
+     not na(rawAClose)
+bool rawBReady =
+     not na(rawBOpen) and
+     not na(rawBHigh) and
+     not na(rawBLow) and
+     not na(rawBClose)
+ComparisonSample comparisonSample = ComparisonSample.new(
+     rawATimestamp,
+     rawACloseTimestamp,
+     rawAOpen,
+     rawAHigh,
+     rawALow,
+     rawAClose,
+     rawBTimestamp,
+     rawBCloseTimestamp,
+     rawBOpen,
+     rawBHigh,
+     rawBLow,
+     rawBClose,
+     rawAReady,
+     rawBReady)
+
+// Auto Mode replaces only the lane timeframe assignments. The existing candle
+// count inputs remain the source of truth in both Manual and Auto modes.
+string effectiveLane1Tf = autoMode ? autoLaneTimeframe(1) : lane1Tf
+string effectiveLane2Tf = autoMode ? autoLaneTimeframe(2) : lane2Tf
+string effectiveLane3Tf = autoMode ? autoLaneTimeframe(3) : lane3Tf
+string effectiveLane4Tf = autoMode ? autoLaneTimeframe(4) : lane4Tf
+string effectiveLane5Tf = autoMode ? autoLaneTimeframe(5) : lane5Tf
+
+bool effectiveLane1Enabled = autoMode ? str.length(effectiveLane1Tf) > 0 : lane1Enabled
+bool effectiveLane2Enabled = autoMode ? str.length(effectiveLane2Tf) > 0 : lane2Enabled
+bool effectiveLane3Enabled = autoMode ? str.length(effectiveLane3Tf) > 0 : lane3Enabled
+bool effectiveLane4Enabled = autoMode ? str.length(effectiveLane4Tf) > 0 : lane4Enabled
+bool effectiveLane5Enabled = autoMode ? str.length(effectiveLane5Tf) > 0 : lane5Enabled
+
+bool lane1TfValid = effectiveLane1Enabled and validCandleTimeframe(effectiveLane1Tf)
+bool lane2TfValid = effectiveLane2Enabled and validCandleTimeframe(effectiveLane2Tf)
+bool lane3TfValid = effectiveLane3Enabled and validCandleTimeframe(effectiveLane3Tf)
+bool lane4TfValid = effectiveLane4Enabled and validCandleTimeframe(effectiveLane4Tf)
+bool lane5TfValid = effectiveLane5Enabled and validCandleTimeframe(effectiveLane5Tf)
+
+bool lane1Active = effectiveLane1Enabled and lane1TfValid
+bool lane2Active = effectiveLane2Enabled and lane2TfValid
+bool lane3Active = effectiveLane3Enabled and lane3TfValid
+bool lane4Active = effectiveLane4Enabled and lane4TfValid
+bool lane5Active = effectiveLane5Enabled and lane5TfValid
+
+int activeLaneCount =
+     (lane1Active ? 1 : 0) +
+     (lane2Active ? 1 : 0) +
+     (lane3Active ? 1 : 0) +
+     (lane4Active ? 1 : 0) +
+     (lane5Active ? 1 : 0)
+
+int reservedCandleCount =
+     (lane1Active ? lane1Count : 0) +
+     (lane2Active ? lane2Count : 0) +
+     (lane3Active ? lane3Count : 0) +
+     (lane4Active ? lane4Count : 0) +
+     (lane5Active ? lane5Count : 0)
+
+int rangeReserve = autoMode and showAutoRanges ? RANGE_FUTURE_RESERVE : 0
+int candleFutureLimit = math.max(80, futureDrawingLimit - rangeReserve)
+int desiredSlotWidth = requestedBodyWidth + requestedCandleGap
+int minimumGapTotal = math.max(activeLaneCount - 1, 0)
+int maximumBaseOffset = activeLaneCount > 0 ? math.max(1, candleFutureLimit - reservedCandleCount - minimumGapTotal) : candleFutureLimit
+int effectiveBaseOffset = activeLaneCount > 0 ? math.min(requestedBaseOffset, maximumBaseOffset) : requestedBaseOffset
+int layoutRoom = candleFutureLimit - effectiveBaseOffset
+
+int effectiveSetGap = requestedSetGap
+if activeLaneCount > 1
+    int maximumSetGap = math.max(1, int(math.floor((layoutRoom - reservedCandleCount) / (activeLaneCount - 1))))
+    effectiveSetGap := math.min(requestedSetGap, maximumSetGap)
+
+int candleRoom = layoutRoom - minimumGapTotal * effectiveSetGap
+int maximumSlotWidth = reservedCandleCount > 0 ? math.max(1, int(math.floor(candleRoom / reservedCandleCount))) : desiredSlotWidth
+int effectiveSlotWidth = math.min(desiredSlotWidth, maximumSlotWidth)
+int effectiveBodyWidth = math.min(requestedBodyWidth, effectiveSlotWidth)
+
+int smtStoragePerLane = activeLaneCount > 0 ? math.max(1, int(math.floor(SMT_LINE_BUDGET / activeLaneCount))) : SMT_LINE_BUDGET
+smtStoragePerLane := math.min(smtStoragePerLane, requestedSmtStoredPerLane)
+int templateLinesPerLane = activeLaneCount > 0 ? math.max(1, int(math.floor(TEMPLATE_LINE_BUDGET / activeLaneCount))) : TEMPLATE_LINE_BUDGET
+int templateBoxesPerLane = activeLaneCount > 0 ? math.max(1, int(math.floor(TEMPLATE_BOX_BUDGET / activeLaneCount))) : TEMPLATE_BOX_BUDGET
+int effectiveRejectionZoneBoxes = math.min(requestedRejectionZoneBoxes, REJECTION_ZONE_BOX_BUDGET)
+
+bool newLane1Bar = false
+bool newLane2Bar = false
+bool newLane3Bar = false
+bool newLane4Bar = false
+bool newLane5Bar = false
+if lane1Active
+    newLane1Bar := ta.change(time(effectiveLane1Tf)) != 0
+if lane2Active
+    newLane2Bar := ta.change(time(effectiveLane2Tf)) != 0
+if lane3Active
+    newLane3Bar := ta.change(time(effectiveLane3Tf)) != 0
+if lane4Active
+    newLane4Bar := ta.change(time(effectiveLane4Tf)) != 0
+if lane5Active
+    newLane5Bar := ta.change(time(effectiveLane5Tf)) != 0
+
+if lane1Active
+    lane1.ingestLane(newLane1Bar, lane1Count, comparisonSample, smtStoragePerLane)
+if lane2Active
+    lane2.ingestLane(newLane2Bar, lane2Count, comparisonSample, smtStoragePerLane)
+if lane3Active
+    lane3.ingestLane(newLane3Bar, lane3Count, comparisonSample, smtStoragePerLane)
+if lane4Active
+    lane4.ingestLane(newLane4Bar, lane4Count, comparisonSample, smtStoragePerLane)
+if lane5Active
+    lane5.ingestLane(newLane5Bar, lane5Count, comparisonSample, smtStoragePerLane)
+
+runRejectionZone(effectiveRejectionZoneBoxes)
+
+// Exact previous completed ranges are requested directly from their own
+// timeframes. These are independent from the projected candle-lane engine.
+string primaryRangeTf = autoPrimaryRangeTimeframe()
+string macroRangeTf = autoMacroRangeTimeframe()
+[primaryPreviousHigh, primaryPreviousLow] = request.security(
+     syminfo.tickerid,
+     primaryRangeTf,
+     [high[1], low[1]],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off)
+[macroPreviousHigh, macroPreviousLow] = request.security(
+     syminfo.tickerid,
+     macroRangeTf,
+     [high[1], low[1]],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off)
+
+if barstate.islast or barstate.isrealtime
+    if showDayRangeDashboard
+        string dashboardTextSize = dayRangeDashboardSizeInput == "Medium" ? size.normal : size.small
+        string hodTimeText = dayRangeTimeText(dayRangeHighTime)
+        string lodTimeText = dayRangeTimeText(dayRangeLowTime)
+        string midPercentText = dayRangePercentText(dayRangePercent)
+        string hodPriceText = na(dayRangeHigh) ? "--" : str.tostring(dayRangeHigh, format.mintick)
+        string midPriceText = na(dayRangeMid) ? "--" : str.tostring(dayRangeMid, format.mintick)
+        string lodPriceText = na(dayRangeLow) ? "--" : str.tostring(dayRangeLow, format.mintick)
+
+        table.cell(dayRangeTable, 0, 0, "HOD", text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeHodBg)
+        table.cell(dayRangeTable, 1, 0, hodTimeText, text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeNeutralBg)
+        table.cell(dayRangeTable, 2, 0, hodPriceText, text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeNeutralBg)
+
+        table.cell(dayRangeTable, 0, 1, "MID", text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeMidBg)
+        table.cell(dayRangeTable, 1, 1, midPercentText, text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeHodBg)
+        table.cell(dayRangeTable, 2, 1, midPriceText, text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeNeutralBg)
+
+        table.cell(dayRangeTable, 0, 2, "LOD", text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeLodBg)
+        table.cell(dayRangeTable, 1, 2, lodTimeText, text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeNeutralBg)
+        table.cell(dayRangeTable, 2, 2, lodPriceText, text_color = dayRangeTextColor, text_size = dashboardTextSize, text_halign = text.align_center, bgcolor = dayRangeNeutralBg)
+
+    int laneCursor = effectiveBaseOffset
+    if lane1Active
+        laneCursor := lane1.layoutLane(laneCursor, lane1Count, effectiveSlotWidth, effectiveBodyWidth, effectiveSetGap, effectiveLane1Tf)
+        lane1.syncTemplateDrawings(lane1Count, templateLinesPerLane, templateBoxesPerLane)
+        lane1.syncSmtDrawings(lane1Count)
+    if lane2Active
+        laneCursor := lane2.layoutLane(laneCursor, lane2Count, effectiveSlotWidth, effectiveBodyWidth, effectiveSetGap, effectiveLane2Tf)
+        lane2.syncTemplateDrawings(lane2Count, templateLinesPerLane, templateBoxesPerLane)
+        lane2.syncSmtDrawings(lane2Count)
+    if lane3Active
+        laneCursor := lane3.layoutLane(laneCursor, lane3Count, effectiveSlotWidth, effectiveBodyWidth, effectiveSetGap, effectiveLane3Tf)
+        lane3.syncTemplateDrawings(lane3Count, templateLinesPerLane, templateBoxesPerLane)
+        lane3.syncSmtDrawings(lane3Count)
+    if lane4Active
+        laneCursor := lane4.layoutLane(laneCursor, lane4Count, effectiveSlotWidth, effectiveBodyWidth, effectiveSetGap, effectiveLane4Tf)
+        lane4.syncTemplateDrawings(lane4Count, templateLinesPerLane, templateBoxesPerLane)
+        lane4.syncSmtDrawings(lane4Count)
+    if lane5Active
+        laneCursor := lane5.layoutLane(laneCursor, lane5Count, effectiveSlotWidth, effectiveBodyWidth, effectiveSetGap, effectiveLane5Tf)
+        lane5.syncTemplateDrawings(lane5Count, templateLinesPerLane, templateBoxesPerLane)
+        lane5.syncSmtDrawings(lane5Count)
+
+    if autoMode and showAutoRanges
+        int primaryLeft = na
+        int primaryRight = na
+        int macroLeft = na
+        int macroRight = na
+
+        if lane1Active and effectiveLane1Tf == primaryRangeTf
+            primaryLeft := laneLeftEdge(lane1, lane1Count)
+            primaryRight := laneRightEdge(lane1, lane1Count)
+        else if lane2Active and effectiveLane2Tf == primaryRangeTf
+            primaryLeft := laneLeftEdge(lane2, lane2Count)
+            primaryRight := laneRightEdge(lane2, lane2Count)
+        else if lane3Active and effectiveLane3Tf == primaryRangeTf
+            primaryLeft := laneLeftEdge(lane3, lane3Count)
+            primaryRight := laneRightEdge(lane3, lane3Count)
+        else if lane4Active and effectiveLane4Tf == primaryRangeTf
+            primaryLeft := laneLeftEdge(lane4, lane4Count)
+            primaryRight := laneRightEdge(lane4, lane4Count)
+        else if lane5Active and effectiveLane5Tf == primaryRangeTf
+            primaryLeft := laneLeftEdge(lane5, lane5Count)
+            primaryRight := laneRightEdge(lane5, lane5Count)
+
+        if lane1Active and effectiveLane1Tf == macroRangeTf
+            macroLeft := laneLeftEdge(lane1, lane1Count)
+            macroRight := laneRightEdge(lane1, lane1Count)
+        else if lane2Active and effectiveLane2Tf == macroRangeTf
+            macroLeft := laneLeftEdge(lane2, lane2Count)
+            macroRight := laneRightEdge(lane2, lane2Count)
+        else if lane3Active and effectiveLane3Tf == macroRangeTf
+            macroLeft := laneLeftEdge(lane3, lane3Count)
+            macroRight := laneRightEdge(lane3, lane3Count)
+        else if lane4Active and effectiveLane4Tf == macroRangeTf
+            macroLeft := laneLeftEdge(lane4, lane4Count)
+            macroRight := laneRightEdge(lane4, lane4Count)
+        else if lane5Active and effectiveLane5Tf == macroRangeTf
+            macroLeft := laneLeftEdge(lane5, lane5Count)
+            macroRight := laneRightEdge(lane5, lane5Count)
+
+        int standaloneCursor = bar_index + laneCursor
+        if na(primaryLeft) or na(primaryRight)
+            primaryLeft := standaloneCursor
+            primaryRight := primaryLeft + RANGE_STANDALONE_WIDTH
+            standaloneCursor := primaryRight + RANGE_STANDALONE_GAP
+
+        if na(macroLeft) or na(macroRight)
+            macroLeft := standaloneCursor
+            macroRight := macroLeft + RANGE_STANDALONE_WIDTH
+
+        syncAutoRange(
+             primaryRangeLines,
+             primaryRangeLabels,
+             primaryRangeTf,
+             primaryPreviousHigh,
+             primaryPreviousLow,
+             false,
+             extendPrimaryRangeTowardPrice,
+             primaryLeft,
+             primaryRight)
+
+        syncAutoRange(
+             macroRangeLines,
+             macroRangeLabels,
+             macroRangeTf,
+             macroPreviousHigh,
+             macroPreviousLow,
+             true,
+             extendMacroRangeTowardPrice,
+             macroLeft,
+             macroRight)
+    else
+        clearRangePool(primaryRangeLines, primaryRangeLabels)
+        clearRangePool(macroRangeLines, macroRangeLabels)
+//neededtodo
