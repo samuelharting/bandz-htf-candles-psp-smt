@@ -1,8 +1,8 @@
-# Bandz HTF
+# Bandz HTF Candles | PSP & SMT
 
 Free, open-source Pine Script v6 indicator by Bandz-ICT.
 
-Higher-timeframe candle lanes, range levels, and market context.
+HTF candles, PSP directional confirmation, SMT divergence, and range context.
 
 ## Install in TradingView
 
